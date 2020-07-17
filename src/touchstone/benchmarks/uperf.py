@@ -33,6 +33,12 @@ class Uperf(BenchmarkBaseClass):
                                     harness_type=harness_type)
         self._search_dict = {
             'elasticsearch': {
+                'metadata': {
+                    'cpuinfo-metadata': {
+                        'element': 'pod_name',
+                        'compare': ['Model name', 'Architecture', 'CPU(s)']
+                        }
+                    },
                 'ripsaw': {
                     'ripsaw-uperf-results': {
                         'compare': ['uuid', 'user', 'cluster_name',
@@ -98,3 +104,7 @@ class Uperf(BenchmarkBaseClass):
 
     def emit_indices(self):
         return self._search_map.keys()
+
+    def emit_metadata_map(self):
+        return self._search_dict[self._source_type]["metadata"]
+
