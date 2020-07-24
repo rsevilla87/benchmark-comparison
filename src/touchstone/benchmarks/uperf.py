@@ -46,16 +46,16 @@ class Uperf(BenchmarkBaseClass):
                 'metadata': {
                     'cpuinfo-metadata': {
                         'element': 'pod_name',
-                        'compare': ['Model name', 'Architecture', 'CPU(s)', 'Hypervisor vendor']
+                        'compare': ['value.Model name', 'value.Architecture', 'value.CPU(s)']
                     },
                     'meminfo-metadata': { 
                         'element': 'pod_name',
-                        'compare': ['MemTotal', 'Active'],
+                        'compare': ['value.MemTotal', 'value.Active'],
                     },
                     'k8s_nodes-metadata': { 
-                        'element': 'pod_name',
-                        'compare': ['status.nodeInfo.osImage', 'status.nodeInfo.kubeletVersion', 'status.nodeInfo.kubeProxyVersion',
-                                    'status.nodeInfo.kernelVersion', 'status.nodeInfo.containerRuntimeVersion'],
+                        'element': 'value.metadata.name',
+                        'compare': ['value.status.nodeInfo.osImage', 'value.status.nodeInfo.kubeletVersion',
+                                    'value.status.nodeInfo.kernelVersion', 'value.status.nodeInfo.containerRuntimeVersion'],
                     }
                 },
                 'ripsaw': { 

@@ -4,6 +4,8 @@ import sys
 import logging
 import json
 import yaml
+from tabulate import tabulate
+
 
 from touchstone import __version__
 from . import benchmarks
@@ -113,9 +115,8 @@ def main(args):
     setup_logging(args.loglevel)
     print_csv = False
     main_json = dict()
-    metadata_json = dict()
     compare_uuid_dict_metadata = dict()
-    metadata = "{} Key Metadata {}".format(("=" * 82), ("=" * 82))
+    metadata = "{} Key metadata {}".format(("=" * 82), ("=" * 82))
     _logger.debug("Instantiating the benchmark instance")
     benchmark_instance = benchmarks.grab(args.benchmark,
                                          source_type=args.database,
@@ -126,30 +127,30 @@ def main(args):
         print_csv = True
         printed_header = False
 
-    #Indices from metadata map
-    for index in benchmark_instance.emit_indices_metadata():
-        for key in benchmark_instance.emit_compare_map_metadata()[index]:
-            compare_uuid_dict_metadata[key] = {}
-        for uuid_index, uuid in enumerate(args.uuid):
-            # Create database connection instance
-            database_instance = databases.grab(args.database, conn_url=args.conn_url[uuid_index])
+    for uuid_index, uuid in enumerate(args.uuid):
+        super_header = "\n{} UUID: {} {}".format(("=" * 65), uuid, ("=" * 65))
+        compare_uuid_dict_metadata[uuid] = {}
+        # Create database connection instance
+        database_instance = databases.grab(args.database, conn_url=args.conn_url[uuid_index])
+        for index in benchmark_instance.emit_metadata_search_map().keys():
+            input_dict = {}
             # Now I added the method emit_compare_metadata_dict to the elasticsearch class
-            compare_uuid_dict_metadata = \
-                database_instance.emit_compare_metadata_dict(uuid=uuid,
-                                                        compare_map=benchmark_instance.emit_metadata_search_map()[index],
-                                                        index=index,
-                                                        input_dict=compare_uuid_dict_metadata)  #noqa
-        #Json/Yaml output comes directly from compare_uuid_dict_metadata
-        if args.output in ["json", "yaml"]:
-            metadata_json = dict(mergedicts(metadata_json, compare_uuid_dict_metadata))
-        else:
-            #Generate stdout
-            for key in benchmark_instance.emit_compare_map_metadata()[index]:
-                _message = "{:50} |".format(key)
-                for value in compare_uuid_dict_metadata[key].keys():
-                    _message += " {:60} |".format(compare_uuid_dict_metadata[key][value])
-                metadata += "\n{}".format(_message)      
-            metadata += "\n{}".format("=" * 178)
+            new_dict =database_instance.emit_compare_metadata_dict(uuid=uuid,
+                                                               compare_map=benchmark_instance.emit_metadata_search_map()[index],
+                                                               index=index,
+                                                               input_dict=input_dict)  #noqa
+            compare_uuid_dict_metadata[uuid] = input_dict
+            if args.output not in ["json", "yaml"]:
+                print(super_header)
+                stockpile_metadata = {}
+                stockpile_metadata["where"] = []
+                for where in input_dict.keys():
+                    stockpile_metadata["where"].append(where)
+                    for k, v in input_dict[where].items():
+                        if k not in stockpile_metadata:
+                            stockpile_metadata[k] = []
+                        stockpile_metadata[k].append(v)
+                print(tabulate(stockpile_metadata, headers="keys", tablefmt="grid"))
 
     #Indices from entered harness (ex: ripsaw)
     for index in benchmark_instance.emit_indices():
@@ -248,10 +249,10 @@ def main(args):
                              compute_buckets, args.uuid, _compute_header,
                              max_level=2 * len(compute_buckets), csv=print_csv)
     if args.output == "json":
-        print(json.dumps(metadata_json, indent=4))
+        print(json.dumps(compare_uuid_dict_metadata, indent=4))
         print(json.dumps(main_json, indent=4))
     elif args.output == "yaml":
-        print(yaml.dump(metadata_json, allow_unicode=True))
+        print(yaml.dump(compare_uuid_dict_metadata, allow_unicode=True))
         print(yaml.dump(main_json, allow_unicode=True))
     elif args.output == "csv":
         pass
