@@ -163,3 +163,11 @@ fields are required in {compute_map}"
             else:
                 return None
         return tmp_dict
+
+    def get_timeseries_result(self, uuid, compute_map, identifier):
+        aggregations = compute_map["not-aggregated"]
+        filters = compute_map.get("filter", {})
+
+        logger.debug("Initializing search object")
+        
+
