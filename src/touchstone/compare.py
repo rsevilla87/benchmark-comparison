@@ -187,7 +187,7 @@ def main(args):
                     for extra_h in ["key", args.identifier, "value"]:
                         compute_header.append(extra_h)
                 elif "not-aggregated" in benchmark_instance.compute_map[index]:
-                    result = database_instance.get_timeseries_results(uuid=uuid,compute_map=compute, index=index, identifier=args.identifier,
+                    result = database_instance.get_timeseries_result(uuid=uuid,compute_map=compute, index=index, identifier=args.identifier,
                     )
                     mergedicts(result, main_json)
                     mergedicts(result, index_json)
@@ -195,7 +195,8 @@ def main(args):
                     for key in compute.get("filter", []):
                         compute_header.append(key.split(".keyword")[0])
 
-                else: logger.error("Not Supported configutation")
+                else:
+                    logger.error("Not Supported configutation")
             if index_json:
                 row_list = []
                 if args.output == "csv":
