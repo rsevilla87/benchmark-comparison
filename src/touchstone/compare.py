@@ -1,249 +1,244 @@
+# -*- coding: utf-8 -*-
+import argparse
+import sys
 import logging
-import elasticsearch
 import json
-from elasticsearch_dsl import Search, A
+import yaml
+import csv
+from tabulate import tabulate
 
-from . import DatabaseBaseClass
+from touchstone import __version__
+from touchstone.benchmarks.generic import Benchmark
+from touchstone import decision_maker
+from . import databases
+from .utils.lib import mergedicts, flatten_and_discard
 
+__author__ = "red-hat-perfscale"
+__copyright__ = "red-hat-perfscale"
+__license__ = "mit"
 
 logger = logging.getLogger("touchstone")
 
 
-class Elasticsearch(DatabaseBaseClass):
-    def _create_conn_object(self):
-        logger.debug("Creating connection object")
-        es = elasticsearch.Elasticsearch([self._conn_url], send_get_body_as="POST")
-        return es
+def parse_args(args):
+    """Parse command line parameters
 
-    def __init__(self, conn_url=None):
-        logger.debug("Initializing Elasticsearch object")
-        DatabaseBaseClass.__init__(self, conn_url=conn_url)
-        self._conn_object = self._create_conn_object()
-        self._aggs_list = []
-        logger.debug("Finished Initializing Elasticsearch object")
+    Args:
+      args ([str]): command line parameters as list of strings
 
-    def gen_result_dict(self, reponse, buckets, aggs, uuid):
-        output_dict = {}
-        input_dict = reponse.aggs.__dict__
-        # Remove .keyword from bucket names
-        buckets = [e.split(".keyword")[0] for e in buckets]
+    Returns:
+      :obj:`argparse.Namespace`: command line parameters namespace
+    """
+    parser = argparse.ArgumentParser(description="compare results from benchmarks")
+    parser.add_argument(
+        "--version", action="version", version="touchstone {ver}".format(ver=__version__),
+    )
+    parser.add_argument(
+        "--database",
+        default="elasticsearch",
+        help="the type of database data is stored in",
+        type=str,
+        choices=["elasticsearch"],
+    )
+    parser.add_argument(
+        "--identifier-key",
+        dest="identifier",
+        help="identifier key name(default: uuid)",
+        type=str,
+        default="uuid",
+    )
+    parser.add_argument(
+        "-u",
+        "--uuid",
+        required=True,
+        help="identifier values to fetch results and compare",
+        type=str,
+        nargs="+",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="How should touchstone output the result",
+        type=str,
+        choices=["json", "yaml", "csv"],
+    )
+    parser.add_argument(
+        "--config",
+        help="Touchstone configuration file",
+        required=True,
+        type=argparse.FileType("r", encoding="utf-8"),
+    )
+    parser.add_argument(
+        "--output-file",
+        dest="output_file",
+        help="Redirect output of json/csv/yaml to file",
+        type=argparse.FileType("w"),
+    )
+    parser.add_argument(
+        "--tolerancy-rules",
+        help="Path to tolerancy rules configuration",
+        type=argparse.FileType("r", encoding="utf-8"),
+    )
+    parser.add_argument(
+        "-url",
+        "--connection-url",
+        required=True,
+        dest="conn_url",
+        help="the database connection strings in the same order as the uuids",
+        type=str,
+        nargs="+",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="loglevel",
+        help="set loglevel to INFO",
+        action="store_const",
+        const=logging.INFO,
+    )
+    parser.add_argument(
+        "-vv",
+        "--very-verbose",
+        dest="loglevel",
+        help="set loglevel to DEBUG",
+        action="store_const",
+        const=logging.DEBUG,
+    )
+    return parser.parse_args(args)
 
-        def build_dict(input_dict, output_dict):
-            # Iterate through buckets and check if that bucket exists in input_dict
-            for b in buckets:
-                # If the bucket exists, add it
-                if b in input_dict:
-                    output_dict[b] = {}
-                    # Iterate through bucket values and recurse with each nested bucket
-                    for bucket in input_dict[b]["buckets"]:
-                        output_dict[b][bucket["key"]] = {}
-                        build_dict(bucket, output_dict[b][bucket["key"]])
-            # This is supposed to run in the last level
-            for agg in aggs:
-                # If the aggregation name is in this level and a value is found for that aggregation,
-                # we add it to the output dict
-                if agg in input_dict and "values" in input_dict[agg]:
-                    for name, value in input_dict[agg]["values"].items():
-                        agg_name = "{}{}".format(name, agg)
-                        output_dict[agg_name] = {}
-                        output_dict[agg_name][uuid] = value
-                elif agg in input_dict:
-                    output_dict[agg] = {}
-                    output_dict[agg][uuid] = input_dict[agg]["value"]
 
-        build_dict(input_dict["_d_"], output_dict)
-        return output_dict
+def setup_logging(loglevel):
+    """Setup basic logging
 
-    def emit_compute_dict(self, uuid, compute_map, index, identifier):
-        """
-        Returns the normalized data from the ES query
-        """
-        output_dict = {}
-        if "aggregations" not in compute_map:
-            logger.critical(
-                f"Incorrect JSON data: nested dictionaries aggregations \
-fields are required in {compute_map}"
+    Args:
+      loglevel (int): minimum loglevel for emitting messages
+    """
+    logformat = "[%(asctime)s] %(levelname)s:%(name)s:%(message)s"
+    logging.basicConfig(level=loglevel, stream=sys.stdout, format=logformat, datefmt="%Y-%m-%d %H:%M:%S")
+
+
+def main(args):
+    """Main entry point allowing external calls
+
+    Args:
+      args ([str]): command line parameter list
+    """
+    args = parse_args(args)
+    setup_logging(args.loglevel)
+    main_json = {}
+    logger.debug("Instantiating the benchmark instance")
+    benchmark_instance = Benchmark(args.config, args.database)
+    if len(args.conn_url) < len(args.uuid):
+        args.conn_url = [args.conn_url[0]] * len(args.uuid)
+    output_file = args.output_file if args.output_file else sys.stdout
+    # Get indices from metadata map
+    metadata_search_map = benchmark_instance.search_map_metadata
+    metadata_dict = {}
+    for index in metadata_search_map.keys():
+        # Set metadata search map
+        for uuid_index, uuid in enumerate(args.uuid):
+            # Create database connection instance
+            database_instance = databases.grab(args.database, conn_url=args.conn_url[uuid_index])
+            # Adding emit_compare_metadata_dict to elasticsearch class
+            database_instance.get_metadata(uuid, metadata_search_map[index], index, metadata_dict)
+        headers = metadata_search_map[index].get("additional_fields", []) + [
+            "metadata",
+            args.identifier,
+            "value",
+        ]
+        if metadata_dict:
+            if args.output == "csv":
+                row_list = [headers]
+                flatten_and_discard(metadata_dict, headers, row_list)
+                writer = csv.writer(output_file, delimiter=",")
+                list(map(writer.writerow, row_list))
+                metadata_dict = {}
+            elif not args.output:
+                row_list = []
+                flatten_and_discard(metadata_dict, headers, row_list)
+                print(
+                    tabulate(row_list, headers=headers, tablefmt="pretty"), file=output_file,
+                )
+                metadata_dict = {}
+
+    # Iterate through indexes
+    for index in benchmark_instance.get_indices():
+        for compute in benchmark_instance.compute_map[index]:
+            # index_json is used for csv and standard output. Since the heeader may be different in each index
+            # we need to print csv or stdout for each index
+            index_json = {}
+            # Iterate through UUIDs
+            for uuid_index, uuid in enumerate(args.uuid):
+
+                # Create database connection instance
+                database_instance = databases.grab(args.database, conn_url=args.conn_url[uuid_index])
+                    # Add method emit_compute_dict to the elasticsearch class
+                if "aggregations" in compute:
+                    result = database_instance.emit_compute_dict(
+                        uuid=uuid, compute_map=compute, index=index, identifier=args.identifier,
+                    )
+                    mergedicts(result, main_json)
+                    mergedicts(result, index_json)
+                    compute_header = []
+                    for key in compute.get("filter", []):
+                        compute_header.append(key.split(".keyword")[0])
+                    for bucket in compute.get("buckets", []):
+                        compute_header.append(bucket.split(".keyword")[0])
+                    for extra_h in ["key", args.identifier, "value"]:
+                        compute_header.append(extra_h)
+
+                elif "not-aggregated" in compute:
+                    
+                    result = database_instance.get_timeseries_results(uuid=uuid, compute_map=compute, index=index, identifier=args.identifier,
+                    )
+                    
+                    #went through elasticsearch file
+
+                    print('elasticsearch complete \n')
+                    
+                    mergedicts(result, main_json)
+                    mergedicts(result, index_json)
+                    compute_header = []
+                    for key in compute.get("filter", []):
+                        compute_header.append(key.split(".keyword")[0])
+
+                else: 
+                    
+                    logger.error("else -Not Supported configutation")
+            if index_json:
+                row_list = []
+                if args.output == "csv":
+                    row_list.append(compute_header)
+                    flatten_and_discard(index_json, compute_header, row_list)
+                    writer = csv.writer(output_file, delimiter=",")
+                    list(map(writer.writerow, row_list))
+                elif not args.output:
+                    flatten_and_discard(index_json, compute_header, row_list)
+                    print(
+                        tabulate(row_list, headers=compute_header, tablefmt="pretty"), file=output_file,
+                    )
+    if metadata_dict:
+        main_json["metadata"] = metadata_dict
+    if args.output == "json":
+        output_file.write(json.dumps(main_json, indent=4))
+    elif args.output == "yaml":
+        output_file.write(yaml.dump(main_json, allow_unicode=True))
+    logger.info("Script ends here")
+    if args.tolerancy_rules:
+        sys.exit(
+            decision_maker.run(
+                args.uuid[0], main_json, args.tolerancy_rules, args.output, compute_header, output_file,
             )
-            exit(1)
-        buckets = compute_map.get("buckets", [])
-        aggregations = compute_map["aggregations"]
-        filters = compute_map.get("filter", {})
-
-        logger.debug("Initializing search object")
-        kw_identifier = identifier + ".keyword"  # append .keyword
-        s = Search(using=self._conn_object, index=str(index)).query("match", **{kw_identifier: uuid})
-        
-           
-        # Apply filters
-        for key, value in filters.items():
-            s = s.filter("term", **{key: value})
-
-        # Apply excludes
-        for key, value in compute_map.get("exclude", {}).items():
-            s = s.exclude("match", **{key: value})
-        if buckets:
-            logger.debug("Building buckets")
-            a = A("terms", field=buckets[0], size=10000)
-            x = s.aggs.bucket(buckets[0].split(".keyword")[0], a)
-            for bucket in buckets[1:]:
-                a = A("terms", field=bucket, size=10000)
-                # Create bucket with and trimming characters after .
-                x = x.bucket(bucket.split(".keyword")[0], a)
-            logger.debug("Finished adding buckets to query")
-        else:
-            a = a = A("terms")
-        logger.debug("Adding aggregations to query")
-        for key, agg_list in aggregations.items():
-            for aggs in agg_list:
-                if isinstance(aggs, str):
-                    _temp_agg_str = "{}({})".format(aggs, key)
-                    # Create aggregation based on the key
-                    a.metric(_temp_agg_str, aggs, field=key)
-                    self._aggs_list.append(_temp_agg_str)
-                # If there's a dictionary of aggregations. i.e different percentiles
-                # we have to iterate through keys and values
-                elif isinstance(aggs, dict):
-                    for dict_key, dict_value in aggs.items():
-                        _temp_agg_str = "{}({})".format(dict_key, key)
-                        # Add nested dict as aggregation
-                        a.metric(_temp_agg_str, dict_key, field=key, **dict_value)
-                        self._aggs_list.append(_temp_agg_str)
-                else:
-                    logger.warn("Ignoring aggregation {}".format(aggs))
-        logger.debug("Finished adding aggregations to query")
-        logger.debug("Built the following query: {}".format(json.dumps(s.to_dict(), indent=4)))
-        response = s.execute()
-        logger.debug("Succesfully executed the search query")
-
-        if len(response.hits.hits) == 0:
-            return {}
-        _output_dict = self.gen_result_dict(response, buckets, self._aggs_list, uuid)
-        if filters:
-            output_dict = _output_dict
-            filter_list = []
-            for key, value in filters.items():
-                filter_list.append(key)
-                filter_list.append(value)
-            # Include all k,v from filters as keys in the output dictionary
-            for key in reversed(filter_list):
-                output_dict = {key.split(".keyword")[0]: output_dict}
-        else:
-            output_dict = _output_dict
-        logger.debug(
-            "output compute dictionary with summaries is: {}".format(json.dumps(output_dict, indent=4))
         )
-        return output_dict
 
-    def get_metadata(self, uuid, compare_map, index, metadata_dict):
-        logger.debug("Initializing metadata search object")
-        s = Search(using=self._conn_object, index=index).query("match", **{"uuid.keyword": uuid})
-        response = s.execute()
 
-        def build_dict(input_dict):
-            for hit in response.hits.hits:
-                tmp_dict = input_dict
-                for additional_field in compare_map.get("additional_fields", []):
-                    field_value = self.access_dotted_field(hit["_source"], additional_field)
-                    if additional_field not in input_dict:
-                        input_dict[additional_field] = {}
-                    if field_value not in input_dict[additional_field]:
-                        input_dict[additional_field][field_value] = {}
-                    tmp_dict = input_dict[additional_field][field_value]
-                for field in compare_map.get("fields", []):
-                    if field not in tmp_dict:
-                        tmp_dict[field] = {}
-                    tmp_dict[field][uuid] = self.access_dotted_field(hit["_source"], field)
+def render():
+    """Entry point for console_scripts
+    """
+    main(sys.argv[1:])
 
-        build_dict(metadata_dict)
 
-    def access_dotted_field(self, input_dict, fields):
-        tmp_dict = input_dict
-        for field in fields.split("."):
-            if field in tmp_dict:
-                tmp_dict = tmp_dict[field]
-            else:
-                return None
-        return tmp_dict
+if __name__ == "__main__":
+    render()
 
-    def gen_filterResults_dict(self, reponse, buckets, uuid):
-        output_dict = {}
-        input_dict = reponse.aggs.__dict__
-        # Remove .keyword from filter names
-        buckets = [e.split(".keyword")[0] for e in buckets]
 
-        print(input_dict, "\n")
-
-        def build_dict(input_dict, output_dict):
-            for b in buckets:
-                # If the bucket exists, add it
-                if b in input_dict:
-                    output_dict[b] = {}
-                    # Iterate through bucket values and recurse with each nested bucket
-                    for bucket in input_dict[b]["buckets"]:
-                        output_dict[b][bucket["key"]] = {}
-                        build_dict(bucket, output_dict[b][bucket["key"]])
-            else:
-                a = a = A("terms")
-            logger.debug("Adding aggregations to query")
-
-        build_dict(input_dict["_d_"], output_dict)
-        
-        return output_dict
-
-    def get_timeseries_results(self, uuid, compute_map, index, identifier):
-
-        #not aggreated data 
-        
-        filters = compute_map.get("filter", {})
-        buckets = compute_map.get("buckets", [])
-        print('This is the filtered results: ', filter, '\n')
-
-        logger.debug("Initializing search object")
-        kw_identifier = identifier + ".keyword" 
-
-        
-        s = Search(using=self._conn_object, index=str(index)).query("match", **{kw_identifier: uuid})
-        
-        
-        # Apply filters
-        for key, value in filters.items():
-            s = s.filter("term", **{key: value})
-        if buckets:
-            logger.debug("Building buckets")
-            a = A("terms", field=buckets[0], size=10000)
-            x = s.aggs.bucket(buckets[0].split(".keyword")[0], a)
-            for bucket in buckets[1:]:
-                a = A("terms", field=bucket, size=10000)
-                # Create bucket with and trimming characters after .
-                x = x.bucket(bucket.split(".keyword")[0], a)
-            logger.debug("Finished adding buckets to query")
-
-        
-
-        logger.debug("Finished adding filters")
-        logger.debug("Built the following query: {}".format(json.dumps(s.to_dict(), indent=4)))
-        response = s.execute()
-        logger.debug("Succesfully executed the search query")
-
-        print(response, "going into the responces: \n")
-
-        if len(response.hits.hits) == 0:
-            return {}
-
-        _output_dict = self.gen_filterResults_dict(response, buckets, uuid)
-        if filters:
-            output_dict = _output_dict
-            filter_list = []
-            for key, value in filters.items():
-                filter_list.append(key)
-                filter_list.append(value)
-            # Include all k,v from filters as keys in the output dictionary
-            for key in reversed(filter_list):
-                output_dict = {key.split(".keyword")[0]: output_dict}
-        else:
-            output_dict = _output_dict
-        logger.debug(
-            "output compute dictionary with summaries is: {}".format(json.dumps(_output_dict, indent=4))
-        )
-        return output_dict
-        
